@@ -1,0 +1,25 @@
+# Define our services
+services:
+  # Our main application service
+  nmap-monitor:
+    # Build using the Dockerfile in the current directory
+    build: .
+    # Map container port 3000 to host port 3000
+    ports:
+      - "3000:3000"
+    # Mount the watch directory from host into container
+    volumes:
+      - ${WATCH_DIR}:/watch
+    # Set environment variables
+    environment:
+      - NODE_ENV=production
+      - WATCH_DIR=/watch
+    # Restart policy for reliability
+    restart: unless-stopped
+    # Add healthcheck to monitor container health
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
