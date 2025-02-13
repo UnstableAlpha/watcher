@@ -60,13 +60,16 @@ const NmapMonitor = ({ view = 'hosts' }) => {
         return () => clearInterval(interval);
     }, [isWatching]);
 
-    // Add new useEffect to update available ports
+    // Update the useEffect that processes available ports
     useEffect(() => {
         if (scannedHosts.length > 0) {
             const ports = new Set();
             scannedHosts.forEach(host => {
                 host.ports?.forEach(port => {
-                    ports.add(`${port.protocol || 'tcp'}/${port.portId}`);
+                    // Only add open ports
+                    if (port.state === 'open') {
+                        ports.add(`${port.protocol || 'tcp'}/${port.portId}`);
+                    }
                 });
             });
             setAvailablePorts(Array.from(ports).sort());
@@ -107,24 +110,28 @@ const NmapMonitor = ({ view = 'hosts' }) => {
         return `${(protocol || 'tcp').toUpperCase()}/${portId}`;
     };
 
+    // Update the groupByPorts function
     const groupByPorts = () => {
         const portMap = new Map();
         
         scannedHosts.forEach(host => {
             host.ports?.forEach(port => {
-                const portKey = `${port.protocol || 'tcp'}/${port.portId}`;
-                if (!portMap.has(portKey)) {
-                    portMap.set(portKey, {
-                        portId: port.portId,
-                        protocol: port.protocol || 'tcp',
-                        service: port.service,
-                        hosts: []
+                // Only process open ports
+                if (port.state === 'open') {
+                    const portKey = `${port.protocol || 'tcp'}/${port.portId}`;
+                    if (!portMap.has(portKey)) {
+                        portMap.set(portKey, {
+                            portId: port.portId,
+                            protocol: port.protocol || 'tcp',
+                            service: port.service,
+                            hosts: []
+                        });
+                    }
+                    portMap.get(portKey).hosts.push({
+                        address: host.address,
+                        status: host.status
                     });
                 }
-                portMap.get(portKey).hosts.push({
-                    address: host.address,
-                    status: host.status
-                });
             });
         });
 
@@ -319,6 +326,7 @@ const NmapMonitor = ({ view = 'hosts' }) => {
         );
     };
 
+    // Update the renderHostView function
     const renderHostView = () => (
         <div className="space-y-4">
             {scannedHosts.map((host, index) => (
@@ -334,7 +342,7 @@ const NmapMonitor = ({ view = 'hosts' }) => {
                         <div className="flex-1 pl-6">
                             <div className="text-sm font-medium mb-2">Open Ports:</div>
                             <div className="space-y-1">
-                                {host.ports?.map((port, portIndex) => (
+                                {host.ports?.filter(port => port.state === 'open').map((port, portIndex) => (
                                     <div key={portIndex} className="text-sm">
                                         {formatProtocolPort(port.protocol, port.portId)} ({port.service || 'unknown'})
                                     </div>

@@ -2,6 +2,7 @@ const chokidar = require('chokidar');
 const { exec } = require('child_process');
 const util = require('util');
 const execPromise = util.promisify(exec);
+const xml2js = require('xml2js');
 
 class FileWatcher {
     constructor(watchPath, onChange) {
@@ -73,5 +74,45 @@ class FileWatcher {
         }
     }
 }
+
+const parseNmapXML = (xmlData) => {
+    return new Promise((resolve, reject) => {
+        xml2js.parseString(xmlData, (err, result) => {
+            if (err) {
+                reject(err);
+                return;
+            }
+
+            try {
+                const hosts = result.nmaprun.host;
+                if (!hosts) {
+                    resolve([]);
+                    return;
+                }
+
+                const parsedResults = hosts.map(host => {
+                    const address = host.address[0].$.addr;
+                    const ports = host.ports[0].port
+                        .filter(port => port.state[0].$.state === 'open')  // Only include open ports
+                        .map(port => ({
+                            portid: port.$.portid,
+                            protocol: port.$.protocol,
+                            state: port.state[0].$.state,
+                            service: port.service[0].$.name
+                        }));
+
+                    return {
+                        address,
+                        ports
+                    };
+                });
+
+                resolve(parsedResults);
+            } catch (error) {
+                reject(error);
+            }
+        });
+    });
+};
 
 module.exports = FileWatcher; 
