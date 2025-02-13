@@ -1,41 +1,37 @@
-# Base stage - This sets up our foundational image
-FROM node:20-alpine AS base
-WORKDIR /app
-
-# Frontend build stage - This compiles our React application
-FROM base AS frontend-builder
+# Build stage for frontend
+FROM node:18-alpine AS frontend-build
 WORKDIR /app/frontend
-# Copy package files first to leverage Docker cache
 COPY frontend/package*.json ./
 RUN npm install
-# Copy the rest of the frontend files
-COPY frontend/ .
-# Build the frontend application
+COPY frontend/ ./
 RUN npm run build
 
-# Ensure all configuration files are copied
-COPY frontend/tailwind.config.js ./
-COPY frontend/postcss.config.js ./
-COPY frontend/vite.config.js ./
-RUN npm run build
-
-# Backend build stage - This prepares our server application
-FROM base AS backend-builder
+# Production stage
+FROM node:18-alpine
 WORKDIR /app/backend
-# Copy package files first to leverage Docker cache
+
+# Install necessary packages and configure sudo
+RUN apk add --no-cache sudo && \
+    echo "node ALL=(ALL) NOPASSWD: /bin/chown" >> /etc/sudoers.d/node && \
+    chmod 0440 /etc/sudoers.d/node
+
+# Copy backend files
 COPY backend/package*.json ./
-RUN npm install
-# Copy the rest of the backend files
-COPY backend/ .
+RUN npm install --production
+COPY backend/ ./
 
-# Production stage - This creates our final, optimised image
-FROM node:20-alpine
-WORKDIR /app
-# Copy built backend and frontend files
-COPY --from=backend-builder /app/backend ./
-COPY --from=frontend-builder /app/frontend/dist ./public
+# Copy built frontend files from build stage
+COPY --from=frontend-build /app/frontend/dist/ /app/backend/public/
 
-# Expose the port our application will run on
+# Create watch directory with appropriate permissions
+RUN mkdir -p /watch && \
+    chown -R node:node /watch
+
+# Switch to non-root user
+USER node
+
+# Expose port
 EXPOSE 3000
-# Start the application
-CMD ["npm", "start"]
+
+# Start command - updated to use server.js
+CMD ["node", "server.js"]
