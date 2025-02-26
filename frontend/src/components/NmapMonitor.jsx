@@ -11,6 +11,11 @@ const NmapMonitor = ({ view = 'hosts' }) => {
     const [basePort, setBasePort] = useState(null);
     const [additionalFilters, setAdditionalFilters] = useState([]);
     const [scanningHosts, setScanningHosts] = useState({});
+    
+    // Add state for service filtering
+    const [availableServices, setAvailableServices] = useState([]);
+    const [baseService, setBaseService] = useState(null);
+    const [additionalServiceFilters, setAdditionalServiceFilters] = useState([]);
 
     // This effect runs when the component mounts to fetch the initial watch directory
     useEffect(() => {
@@ -77,6 +82,39 @@ const NmapMonitor = ({ view = 'hosts' }) => {
             setAvailablePorts(Array.from(ports).sort());
         }
     }, [scannedHosts]);
+
+    // Add useEffect to process available services
+    useEffect(() => {
+        if (scannedHosts.length > 0) {
+            const services = new Set();
+            scannedHosts.forEach(host => {
+                host.ports?.forEach(port => {
+                    if (port.state === 'open' && port.service && port.service !== 'unknown') {
+                        services.add(port.service);
+                    }
+                });
+            });
+            setAvailableServices(Array.from(services).sort());
+        }
+    }, [scannedHosts]);
+
+    // Add a useEffect to clear scanning state when new results come in
+    useEffect(() => {
+        // When scannedHosts changes, check if any scanning hosts now have serviceScanned=true
+        const updatedScanningHosts = { ...scanningHosts };
+        let hasChanges = false;
+        
+        scannedHosts.forEach(host => {
+            if (updatedScanningHosts[host.address] && host.serviceScanned) {
+                delete updatedScanningHosts[host.address];
+                hasChanges = true;
+            }
+        });
+        
+        if (hasChanges) {
+            setScanningHosts(updatedScanningHosts);
+        }
+    }, [scannedHosts, scanningHosts]);
 
     // Function to handle starting/changing directory monitoring
     const handleDirectoryChange = async () => {
@@ -195,58 +233,168 @@ const NmapMonitor = ({ view = 'hosts' }) => {
         setAdditionalFilters([]);
     };
 
+    // Add service filter handlers
+    const handleServiceSelect = (service) => {
+        if (!baseService) {
+            setBaseService(service);
+        } else if (!additionalServiceFilters.some(f => f.service === service)) {
+            setAdditionalServiceFilters(prev => [...prev, { service, operation: 'AND' }]);
+        }
+    };
+
+    const toggleServiceOperation = (index) => {
+        setAdditionalServiceFilters(prev => prev.map((filter, i) => {
+            if (i === index) {
+                const operations = ['AND', 'OR', 'NOT'];
+                const currentIndex = operations.indexOf(filter.operation);
+                const nextOperation = operations[(currentIndex + 1) % operations.length];
+                return { ...filter, operation: nextOperation };
+            }
+            return filter;
+        }));
+    };
+
+    const removeServiceFilter = (index) => {
+        setAdditionalServiceFilters(prev => prev.filter((_, i) => i !== index));
+    };
+
+    const clearAllServiceFilters = () => {
+        setBaseService(null);
+        setAdditionalServiceFilters([]);
+    };
+
     const getFilteredHosts = () => {
-        if (!basePort) return new Set();
-
-        // Get all hosts that have the base port
-        let filteredHosts = new Set(
-            scannedHosts
-                .filter(host => host.ports?.some(p => `${p.protocol || 'tcp'}/${p.portId}` === basePort))
-                .map(host => host.address)
-        );
-
-        // Apply additional filters
-        additionalFilters.forEach(filter => {
-            const hostsWithFilter = new Set(
+        // Start with all hosts
+        let filteredHosts = new Set(scannedHosts.map(host => host.address));
+        let appliedFilters = false;
+        
+        // Apply port filters if there's a base port
+        if (basePort) {
+            appliedFilters = true;
+            // Get hosts with base port
+            filteredHosts = new Set(
                 scannedHosts
-                    .filter(host => host.ports?.some(p => `${p.protocol || 'tcp'}/${p.portId}` === filter.port))
+                    .filter(host => host.ports?.some(p => `${p.protocol || 'tcp'}/${p.portId}` === basePort))
                     .map(host => host.address)
             );
 
-            switch (filter.operation) {
-                case 'AND':
-                    filteredHosts = new Set([...filteredHosts].filter(host => hostsWithFilter.has(host)));
-                    break;
-                case 'OR':
-                    filteredHosts = new Set([...filteredHosts, ...hostsWithFilter]);
-                    break;
-                case 'NOT':
-                    filteredHosts = new Set([...filteredHosts].filter(host => !hostsWithFilter.has(host)));
-                    break;
-            }
-        });
+            // Apply additional port filters
+            additionalFilters.forEach(filter => {
+                const hostsWithFilter = new Set(
+                    scannedHosts
+                        .filter(host => host.ports?.some(p => `${p.protocol || 'tcp'}/${p.portId}` === filter.port))
+                        .map(host => host.address)
+                );
 
+                switch (filter.operation) {
+                    case 'AND':
+                        filteredHosts = new Set([...filteredHosts].filter(host => hostsWithFilter.has(host)));
+                        break;
+                    case 'OR':
+                        filteredHosts = new Set([...filteredHosts, ...hostsWithFilter]);
+                        break;
+                    case 'NOT':
+                        filteredHosts = new Set([...filteredHosts].filter(host => !hostsWithFilter.has(host)));
+                        break;
+                }
+            });
+        }
+        
+        // Apply service filters if there's a base service
+        if (baseService) {
+            appliedFilters = true;
+            // Get hosts with base service
+            const hostsWithBaseService = new Set(
+                scannedHosts
+                    .filter(host => host.ports?.some(p => p.service === baseService))
+                    .map(host => host.address)
+            );
+            
+            // If we have port filters, intersect with service filters
+            if (basePort) {
+                filteredHosts = new Set([...filteredHosts].filter(host => hostsWithBaseService.has(host)));
+            } else {
+                // Otherwise, start with hosts that have the base service
+                filteredHosts = hostsWithBaseService;
+            }
+            
+            // Apply additional service filters
+            additionalServiceFilters.forEach(filter => {
+                const hostsWithFilter = new Set(
+                    scannedHosts
+                        .filter(host => host.ports?.some(p => p.service === filter.service))
+                        .map(host => host.address)
+                );
+
+                switch (filter.operation) {
+                    case 'AND':
+                        filteredHosts = new Set([...filteredHosts].filter(host => hostsWithFilter.has(host)));
+                        break;
+                    case 'OR':
+                        filteredHosts = new Set([...filteredHosts, ...hostsWithFilter]);
+                        break;
+                    case 'NOT':
+                        filteredHosts = new Set([...filteredHosts].filter(host => !hostsWithFilter.has(host)));
+                        break;
+                }
+            });
+        }
+        
+        // If no filters are applied, return all hosts
+        if (!appliedFilters) {
+            return new Set(scannedHosts.map(host => host.address));
+        }
+        
         return filteredHosts;
     };
 
+    // Update the shouldShowPort function to also consider service filters
     const shouldShowPort = (portData) => {
-        if (!basePort) return true;
+        // If no filters are applied, show all ports
+        if (!basePort && !baseService) return true;
         
-        const currentPort = `${portData.protocol}/${portData.portId}`;
-        
-        // Show if it's the base port
-        if (currentPort === basePort) return true;
-        
-        // Don't show ports that are in NOT filters
-        const notFilters = additionalFilters.filter(f => f.operation === 'NOT');
-        if (notFilters.some(filter => filter.port === currentPort)) {
-            return false;
+        // If we have a service filter, check if this port has that service
+        if (baseService) {
+            // If this port has the base service, show it
+            if (portData.service === baseService) return true;
+            
+            // Check if this port has any of the OR service filters
+            const orServiceFilters = additionalServiceFilters.filter(f => f.operation === 'OR');
+            if (orServiceFilters.some(filter => filter.service === portData.service)) {
+                return true;
+            }
+            
+            // If we only have service filters (no port filters), check NOT filters
+            if (!basePort) {
+                // Don't show ports with services that are in NOT filters
+                const notServiceFilters = additionalServiceFilters.filter(f => f.operation === 'NOT');
+                if (notServiceFilters.some(filter => filter.service === portData.service)) {
+                    return false;
+                }
+            }
         }
         
-        // Show if it's in AND or OR filters
-        return additionalFilters.some(filter => 
-            filter.operation !== 'NOT' && filter.port === currentPort
-        );
+        // If we have a port filter, apply the port filter logic
+        if (basePort) {
+            const currentPort = `${portData.protocol}/${portData.portId}`;
+            
+            // Show if it's the base port
+            if (currentPort === basePort) return true;
+            
+            // Don't show ports that are in NOT filters
+            const notFilters = additionalFilters.filter(f => f.operation === 'NOT');
+            if (notFilters.some(filter => filter.port === currentPort)) {
+                return false;
+            }
+            
+            // Show if it's in AND or OR filters
+            return additionalFilters.some(filter => 
+                filter.operation !== 'NOT' && filter.port === currentPort
+            );
+        }
+        
+        // If we have service filters but this port doesn't match any of them
+        return false;
     };
 
     // Updated renderPortFilter function to display filters inline
@@ -329,143 +477,113 @@ const NmapMonitor = ({ view = 'hosts' }) => {
         );
     };
 
-    // Add this new function near the other utility functions
-    const generateNmapCommand = (host) => {
-        if (!host.ports || host.ports.length === 0) return null;
-        
-        const openPorts = host.ports
-            .filter(port => port.state === 'open')
-            .map(port => port.portId)
-            .join(',');
-            
-        // Add -Pn flag to skip host discovery
-        return `nmap -Pn -sV -p${openPorts} -oA /watch/${host.address}-ServiceScan ${host.address}`;
+    // Add service filter UI
+    const renderServiceFilter = () => {
+        if (view !== 'ports') return null;
+
+        return (
+            <div className="mb-4 p-4 bg-white rounded-lg shadow">
+                <div className="font-medium mb-2">Service Filters:</div>
+                
+                {/* Base Service and Additional Filters in a single row */}
+                <div className="mb-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                        {baseService ? (
+                            <>
+                                <div className="flex items-center bg-purple-500 text-white px-3 py-1 rounded-md text-sm">
+                                    <span className="mr-2">Base:</span>
+                                    {baseService}
+                                    <button
+                                        onClick={clearAllServiceFilters}
+                                        className="ml-2 hover:text-purple-200"
+                                    >
+                                        ×
+                                    </button>
+                                </div>
+                                
+                                {/* Additional Service Filters inline */}
+                                {additionalServiceFilters.map((filter, index) => (
+                                    <div 
+                                        key={index}
+                                        className="flex items-center bg-gray-100 rounded-lg overflow-hidden"
+                                    >
+                                        <button
+                                            onClick={() => toggleServiceOperation(index)}
+                                            className={`px-2 py-1 text-sm font-medium ${
+                                                filter.operation === 'AND' ? 'bg-purple-500 text-white' :
+                                                filter.operation === 'OR' ? 'bg-green-500 text-white' :
+                                                'bg-red-500 text-white'
+                                            }`}
+                                        >
+                                            {filter.operation}
+                                        </button>
+                                        <span className="px-2 py-1 text-sm">{filter.service}</span>
+                                        <button
+                                            onClick={() => removeServiceFilter(index)}
+                                            className="px-2 py-1 text-sm text-red-500 hover:bg-red-100"
+                                        >
+                                            ×
+                                        </button>
+                                    </div>
+                                ))}
+                            </>
+                        ) : (
+                            <div className="text-sm text-gray-500">Select a base service first</div>
+                        )}
+                    </div>
+                </div>
+
+                {/* Available Services */}
+                <div className="flex flex-wrap gap-2">
+                    {availableServices
+                        .filter(service => service !== baseService && !additionalServiceFilters.some(f => f.service === service))
+                        .map((service) => (
+                            <button
+                                key={service}
+                                onClick={() => handleServiceSelect(service)}
+                                className="px-3 py-1 rounded-md text-sm bg-gray-200 text-gray-700 hover:bg-gray-300 transition-colors"
+                            >
+                                {service}
+                            </button>
+                        ))}
+                </div>
+
+                {baseService && (
+                    <div className="mt-2 text-sm text-gray-600">
+                        Click on AND/OR/NOT to toggle additional filter operations
+                    </div>
+                )}
+            </div>
+        );
     };
 
-    // Update the executeNmapScan function
-    const executeNmapScan = async (host) => {
-        const command = generateNmapCommand(host);
-        console.log('Generated command:', command);
-        
-        if (!command) {
-            console.error('No command generated');
-            return;
-        }
-
-        try {
-            // Set this host as scanning
-            setScanningHosts(prev => ({
-                ...prev,
-                [host.address]: true
-            }));
-            
-            console.log('Sending scan request...');
-            const response = await fetch('/api/execute-scan', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ command }),
-            });
-
-            const data = await response.json();
-            console.log('Response data:', data);
-
-            if (!response.ok) {
-                throw new Error(data.error || `HTTP error! status: ${response.status}`);
-            }
-
-            // We don't clear the scanning state here - it will be cleared when results come in
-            // Instead, we start a timeout to clear it after 5 minutes in case results never arrive
-            setTimeout(() => {
-                setScanningHosts(prev => {
-                    const updated = { ...prev };
-                    delete updated[host.address];
-                    return updated;
-                });
-            }, 300000); // 5 minutes timeout
-
-        } catch (err) {
-            console.error('Failed to execute scan:', err);
-            console.error('Error details:', err.message);
-            
-            // Clear scanning state on error
-            setScanningHosts(prev => {
-                const updated = { ...prev };
-                delete updated[host.address];
-                return updated;
-            });
-            
-            // Show error message
-            const button = document.getElementById(`scan-button-${host.address}`);
-            if (button) {
-                const originalText = "Launch Nmap Service Scan";
-                button.textContent = `Failed: ${err.message}`;
-                button.classList.add('bg-red-500');
-                setTimeout(() => {
-                    button.textContent = originalText;
-                    button.classList.remove('bg-red-500');
-                }, 2000);
-            }
-        }
-    };
-
-    // Add an effect to clear scanning state when new results come in
-    useEffect(() => {
-        // When scannedHosts changes, check if any scanning hosts now have serviceScanned=true
-        const updatedScanningHosts = { ...scanningHosts };
-        let hasChanges = false;
-        
-        scannedHosts.forEach(host => {
-            if (updatedScanningHosts[host.address] && host.serviceScanned) {
-                delete updatedScanningHosts[host.address];
-                hasChanges = true;
-            }
-        });
-        
-        if (hasChanges) {
-            setScanningHosts(updatedScanningHosts);
-        }
-    }, [scannedHosts]);
-
-    // Update the renderHostView function to show enhanced service information
     const renderHostView = () => (
         <div className="space-y-4">
             {scannedHosts.map((host, index) => (
-                <div key={index} className="p-4 border rounded-lg">
-                    <div className="flex flex-col">
-                        {/* Host header with status */}
-                        <div className="flex items-center justify-between mb-3">
-                            <div>
-                                <div className="font-medium text-lg">Host: {host.address}</div>
-                                <div className="text-sm text-gray-500">Status: {host.status}</div>
-                            </div>
+                <div key={index} id={`host-${host.address}`} className="p-4 border rounded-lg">
+                    <div className="mb-4">
+                        <div className="font-medium">{host.address}</div>
+                        <div className="flex items-center gap-3 mt-2">
+                            {scanningHosts[host.address] ? (
+                                <span className="px-3 py-1 bg-yellow-100 text-yellow-800 rounded text-sm">
+                                    Scanning...
+                                </span>
+                            ) : (
+                                <button
+                                    onClick={() => handleServiceScan(host)}
+                                    className="px-3 py-1 bg-blue-500 text-white rounded text-sm hover:bg-blue-600 transition-colors"
+                                >
+                                    Service Scan
+                                </button>
+                            )}
                             {host.serviceScanned && (
                                 <div className="text-xs text-gray-500">
-                                    Service scan: {new Date(host.lastServiceScan).toLocaleString()}
+                                    Last scan: {formatLastScanTime(host)}
                                 </div>
                             )}
                         </div>
-                        
-                        {/* Scan button */}
-                        <div className="mb-3">
-                            {host.ports?.some(port => port.state === 'open') && (
-                                <button
-                                    id={`scan-button-${host.address}`}
-                                    onClick={() => !scanningHosts[host.address] && executeNmapScan(host)}
-                                    className={`px-3 py-1 text-sm ${
-                                        scanningHosts[host.address] 
-                                            ? 'bg-amber-500 cursor-not-allowed' 
-                                            : 'bg-green-500 hover:bg-green-600'
-                                    } text-white rounded transition-colors`}
-                                    disabled={scanningHosts[host.address]}
-                                >
-                                    {scanningHosts[host.address] ? 'Scan in progress...' : 'Launch Nmap Service Scan'}
-                                </button>
-                            )}
-                        </div>
-                        
-                        {/* Ports table */}
+                    </div>
+                    <div className="mt-4">
                         <div className="overflow-x-auto">
                             <table className="min-w-full divide-y divide-gray-200">
                                 <thead className="bg-gray-50">
@@ -536,42 +654,64 @@ const NmapMonitor = ({ view = 'hosts' }) => {
         
         return (
             <div className="space-y-4">
-                {renderPortFilter()}
-                {filteredPorts.map((portData, index) => (
-                    <div key={index} className="p-4 border rounded-lg">
-                        <div className="flex">
-                            {/* Left pane - Port information */}
-                            <div className="flex-1 pr-6 border-r">
-                                <div className="font-medium">
-                                    {formatProtocolPort(portData.protocol, portData.portId)}
+                {/* Two-column filter layout */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div>{renderPortFilter()}</div>
+                    <div>{renderServiceFilter()}</div>
+                </div>
+                
+                {filteredPorts.length > 0 ? (
+                    filteredPorts.map((portData, index) => (
+                        <div key={index} className="p-4 border rounded-lg">
+                            <div className="flex flex-col md:flex-row">
+                                {/* Left pane - Port information */}
+                                <div className="md:flex-1 pr-0 md:pr-6 border-b md:border-b-0 md:border-r pb-4 md:pb-0">
+                                    <div className="font-medium">
+                                        {formatProtocolPort(portData.protocol, portData.portId)}
+                                    </div>
+                                    <div className="text-sm text-gray-500 mb-4">
+                                        Service: {portData.service || 'unknown'}
+                                    </div>
+                                    <button
+                                        onClick={() => handleExport(portData)}
+                                        className="px-3 py-1 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+                                    >
+                                        Export Hosts
+                                    </button>
                                 </div>
-                                <div className="text-sm text-gray-500 mb-4">
-                                    Service: {portData.service || 'unknown'}
-                                </div>
-                                <button
-                                    onClick={() => handleExport(portData)}
-                                    className="px-3 py-1 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
-                                >
-                                    Export Hosts
-                                </button>
-                            </div>
 
-                            {/* Right pane - Hosts list */}
-                            <div className="flex-1 pl-6">
-                                <div className="text-sm font-medium mb-2">Hosts:</div>
-                                <div className="space-y-1">
-                                    {portData.hosts
-                                        .filter(host => !basePort || filteredHosts.has(host.address))
-                                        .map((host, hostIndex) => (
-                                            <div key={hostIndex} className="text-sm">
-                                                {host.address}
-                                            </div>
-                                        ))}
+                                {/* Right pane - Hosts list */}
+                                <div className="md:flex-1 pl-0 md:pl-6 pt-4 md:pt-0">
+                                    <div className="text-sm font-medium mb-2">Hosts:</div>
+                                    <div className="flex flex-wrap gap-2">
+                                        {portData.hosts
+                                            .filter(host => filteredHosts.has(host.address))
+                                            .map((host, hostIndex) => (
+                                                <a 
+                                                    key={hostIndex} 
+                                                    href="#" 
+                                                    onClick={(e) => {
+                                                        e.preventDefault();
+                                                        // Navigate to the host view
+                                                        window.location.href = '/';
+                                                        // Store the host to navigate to
+                                                        sessionStorage.setItem('navigateToHost', host.address);
+                                                    }}
+                                                    className="px-3 py-1 bg-gray-100 rounded text-sm text-blue-600 hover:bg-gray-200 hover:text-blue-800 cursor-pointer"
+                                                >
+                                                    {host.address}
+                                                </a>
+                                            ))}
+                                    </div>
                                 </div>
                             </div>
                         </div>
+                    ))
+                ) : (
+                    <div className="p-4 bg-gray-50 text-gray-500 text-center rounded-lg">
+                        No ports match the current filters
                     </div>
-                ))}
+                )}
             </div>
         );
     };
@@ -599,6 +739,102 @@ const NmapMonitor = ({ view = 'hosts' }) => {
             default:
                 return renderHostView();
         }
+    };
+
+    // Update the handleServiceScan function to store the timestamp more reliably
+    const handleServiceScan = async (host) => {
+        try {
+            // Mark this host as being scanned
+            setScanningHosts(prev => ({
+                ...prev,
+                [host.address]: true
+            }));
+            
+            // Get current timestamp for tracking
+            const scanTime = new Date();
+            const scanTimeStr = scanTime.toLocaleString();
+            const scanTimeISO = scanTime.toISOString();
+            
+            // Store the scan time in localStorage for persistence
+            localStorage.setItem(`scanTime_${host.address}`, scanTimeStr);
+            
+            // Construct the nmap command for service scanning
+            const command = `nmap -sV -Pn -p ${host.ports
+                .filter(port => port.state === 'open')
+                .map(port => port.portId)
+                .join(',')} ${host.address} -oX /watch/${host.address.replace(/\./g, '_')}-ServiceScan.xml`;
+            
+            console.log('Executing service scan:', command);
+            
+            // Send the scan command to the backend
+            const response = await fetch('/api/execute-scan', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ 
+                    command,
+                    hostAddress: host.address,
+                    scanTime: scanTimeISO
+                }),
+            });
+            
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || 'Failed to start service scan');
+            }
+            
+            // Update the host locally with the scan time
+            setScannedHosts(prev => prev.map(h => {
+                if (h.address === host.address) {
+                    return {
+                        ...h,
+                        serviceScanned: true,
+                        serviceScannedTime: scanTimeISO,
+                        serviceScannedTimeStr: scanTimeStr
+                    };
+                }
+                return h;
+            }));
+            
+            // Success message
+            console.log('Service scan started successfully');
+        } catch (error) {
+            console.error('Error starting service scan:', error);
+            setError(`Failed to start service scan: ${error.message}`);
+            
+            // Remove from scanning hosts on error
+            setScanningHosts(prev => {
+                const updated = { ...prev };
+                delete updated[host.address];
+                return updated;
+            });
+        }
+    };
+
+    // Update the formatLastScanTime function to check localStorage
+    const formatLastScanTime = (host) => {
+        // First check localStorage for a stored timestamp
+        const storedTime = localStorage.getItem(`scanTime_${host.address}`);
+        if (storedTime) {
+            return storedTime;
+        }
+        
+        // Then check the host object properties
+        if (host.serviceScannedTimeStr) {
+            return host.serviceScannedTimeStr;
+        }
+        
+        if (host.serviceScannedTime) {
+            try {
+                // Try various parsing methods as before
+                // ...
+            } catch (error) {
+                console.error('Error formatting scan time:', error);
+            }
+        }
+        
+        return 'Unknown';
     };
 
     return (
