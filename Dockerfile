@@ -10,9 +10,12 @@ RUN npm run build
 FROM node:18-alpine
 WORKDIR /app/backend
 
-# Install necessary packages and configure sudo
-RUN apk add --no-cache sudo && \
-    echo "node ALL=(ALL) NOPASSWD: /bin/chown" >> /etc/sudoers.d/node && \
+# Install necessary packages including Docker
+RUN apk add --no-cache \
+    sudo \
+    docker \
+    docker-cli-compose && \
+    echo "node ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers.d/node && \
     chmod 0440 /etc/sudoers.d/node
 
 # Copy backend files
@@ -33,5 +36,5 @@ USER node
 # Expose port
 EXPOSE 3000
 
-# Start command - updated to use server.js
+# Start command
 CMD ["node", "server.js"]

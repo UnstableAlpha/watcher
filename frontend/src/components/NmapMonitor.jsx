@@ -4,12 +4,13 @@ const NmapMonitor = ({ view = 'hosts' }) => {
     // Set up our state management for all the features we need
     const [scannedHosts, setScannedHosts] = useState([]);
     const [error, setError] = useState(null);
-    const [watchDirectory] = useState('/watch');
+    const [watchDirectory, setWatchDirectory] = useState('');
     const [isWatching, setIsWatching] = useState(false);
     const [loading, setLoading] = useState(true);
     const [availablePorts, setAvailablePorts] = useState([]);
     const [basePort, setBasePort] = useState(null);
     const [additionalFilters, setAdditionalFilters] = useState([]);
+    const [scanningHosts, setScanningHosts] = useState({});
 
     // This effect runs when the component mounts to fetch the initial watch directory
     useEffect(() => {
@@ -22,6 +23,7 @@ const NmapMonitor = ({ view = 'hosts' }) => {
                 }
                 const data = await response.json();
                 console.log('Received watch directory:', data);
+                setWatchDirectory(data.directory);
                 setIsWatching(Boolean(data.directory));
             } catch (err) {
                 console.error('Error fetching watch directory:', err);
@@ -326,28 +328,200 @@ const NmapMonitor = ({ view = 'hosts' }) => {
         );
     };
 
-    // Update the renderHostView function
+    // Add this new function near the other utility functions
+    const generateNmapCommand = (host) => {
+        if (!host.ports || host.ports.length === 0) return null;
+        
+        const openPorts = host.ports
+            .filter(port => port.state === 'open')
+            .map(port => port.portId)
+            .join(',');
+            
+        // Add -Pn flag to skip host discovery
+        return `nmap -Pn -sV -p${openPorts} -oA /watch/${host.address}-ServiceScan ${host.address}`;
+    };
+
+    // Update the executeNmapScan function
+    const executeNmapScan = async (host) => {
+        const command = generateNmapCommand(host);
+        console.log('Generated command:', command);
+        
+        if (!command) {
+            console.error('No command generated');
+            return;
+        }
+
+        try {
+            // Set this host as scanning
+            setScanningHosts(prev => ({
+                ...prev,
+                [host.address]: true
+            }));
+            
+            console.log('Sending scan request...');
+            const response = await fetch('/api/execute-scan', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ command }),
+            });
+
+            const data = await response.json();
+            console.log('Response data:', data);
+
+            if (!response.ok) {
+                throw new Error(data.error || `HTTP error! status: ${response.status}`);
+            }
+
+            // We don't clear the scanning state here - it will be cleared when results come in
+            // Instead, we start a timeout to clear it after 5 minutes in case results never arrive
+            setTimeout(() => {
+                setScanningHosts(prev => {
+                    const updated = { ...prev };
+                    delete updated[host.address];
+                    return updated;
+                });
+            }, 300000); // 5 minutes timeout
+
+        } catch (err) {
+            console.error('Failed to execute scan:', err);
+            console.error('Error details:', err.message);
+            
+            // Clear scanning state on error
+            setScanningHosts(prev => {
+                const updated = { ...prev };
+                delete updated[host.address];
+                return updated;
+            });
+            
+            // Show error message
+            const button = document.getElementById(`scan-button-${host.address}`);
+            if (button) {
+                const originalText = "Launch Nmap Service Scan";
+                button.textContent = `Failed: ${err.message}`;
+                button.classList.add('bg-red-500');
+                setTimeout(() => {
+                    button.textContent = originalText;
+                    button.classList.remove('bg-red-500');
+                }, 2000);
+            }
+        }
+    };
+
+    // Add an effect to clear scanning state when new results come in
+    useEffect(() => {
+        // When scannedHosts changes, check if any scanning hosts now have serviceScanned=true
+        const updatedScanningHosts = { ...scanningHosts };
+        let hasChanges = false;
+        
+        scannedHosts.forEach(host => {
+            if (updatedScanningHosts[host.address] && host.serviceScanned) {
+                delete updatedScanningHosts[host.address];
+                hasChanges = true;
+            }
+        });
+        
+        if (hasChanges) {
+            setScanningHosts(updatedScanningHosts);
+        }
+    }, [scannedHosts]);
+
+    // Update the renderHostView function to show enhanced service information
     const renderHostView = () => (
         <div className="space-y-4">
             {scannedHosts.map((host, index) => (
                 <div key={index} className="p-4 border rounded-lg">
-                    <div className="flex">
-                        {/* Left pane - Host information */}
-                        <div className="flex-1 pr-6 border-r">
-                            <div className="font-medium">Host: {host.address}</div>
-                            <div className="text-sm text-gray-500">Status: {host.status}</div>
-                        </div>
-
-                        {/* Right pane - Ports list */}
-                        <div className="flex-1 pl-6">
-                            <div className="text-sm font-medium mb-2">Open Ports:</div>
-                            <div className="space-y-1">
-                                {host.ports?.filter(port => port.state === 'open').map((port, portIndex) => (
-                                    <div key={portIndex} className="text-sm">
-                                        {formatProtocolPort(port.protocol, port.portId)} ({port.service || 'unknown'})
-                                    </div>
-                                ))}
+                    <div className="flex flex-col">
+                        {/* Host header with status */}
+                        <div className="flex items-center justify-between mb-3">
+                            <div>
+                                <div className="font-medium text-lg">Host: {host.address}</div>
+                                <div className="text-sm text-gray-500">Status: {host.status}</div>
                             </div>
+                            {host.serviceScanned && (
+                                <div className="text-xs text-gray-500">
+                                    Service scan: {new Date(host.lastServiceScan).toLocaleString()}
+                                </div>
+                            )}
+                        </div>
+                        
+                        {/* Scan button */}
+                        <div className="mb-3">
+                            {host.ports?.some(port => port.state === 'open') && (
+                                <button
+                                    id={`scan-button-${host.address}`}
+                                    onClick={() => !scanningHosts[host.address] && executeNmapScan(host)}
+                                    className={`px-3 py-1 text-sm ${
+                                        scanningHosts[host.address] 
+                                            ? 'bg-amber-500 cursor-not-allowed' 
+                                            : 'bg-green-500 hover:bg-green-600'
+                                    } text-white rounded transition-colors`}
+                                    disabled={scanningHosts[host.address]}
+                                >
+                                    {scanningHosts[host.address] ? 'Scan in progress...' : 'Launch Nmap Service Scan'}
+                                </button>
+                            )}
+                        </div>
+                        
+                        {/* Ports table */}
+                        <div className="overflow-x-auto">
+                            <table className="min-w-full divide-y divide-gray-200">
+                                <thead className="bg-gray-50">
+                                    <tr>
+                                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Port</th>
+                                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Service</th>
+                                        <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Version</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="bg-white divide-y divide-gray-200">
+                                    {host.ports?.filter(port => port.state === 'open' || port.previousState === 'open').map((port, portIndex) => (
+                                        <tr key={portIndex} className={portIndex % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                                            <td className="px-3 py-2 whitespace-nowrap text-sm">
+                                                {formatProtocolPort(port.protocol, port.portId)}
+                                            </td>
+                                            <td className="px-3 py-2 whitespace-nowrap text-sm">
+                                                <div className="flex flex-col">
+                                                    <div className={`font-medium ${
+                                                        port.state === 'open' ? 'text-green-600' : 
+                                                        port.state === 'closed' ? 'text-red-600' : 
+                                                        port.state === 'filtered' ? 'text-yellow-600' : 'text-gray-600'
+                                                    }`}>
+                                                        {port.state}
+                                                    </div>
+                                                    {port.previousState && port.previousState !== port.state && (
+                                                        <div className="text-xs text-gray-500">
+                                                            Previously: {port.previousState} 
+                                                            <span className="ml-1">
+                                                                ({new Date(port.previousStateTimestamp).toLocaleString()})
+                                                            </span>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </td>
+                                            <td className="px-3 py-2 whitespace-nowrap text-sm">
+                                                {port.service || 'unknown'}
+                                            </td>
+                                            <td className="px-3 py-2 text-sm">
+                                                {port.product ? (
+                                                    <div>
+                                                        <div>{port.product} {port.version}</div>
+                                                        {port.extraInfo && (
+                                                            <div className="text-xs text-gray-500">{port.extraInfo}</div>
+                                                        )}
+                                                        {port.osType && (
+                                                            <div className="text-xs text-gray-500">OS: {port.osType}</div>
+                                                        )}
+                                                    </div>
+                                                ) : (
+                                                    <span className="text-gray-400">No version info</span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
                         </div>
                     </div>
                 </div>
