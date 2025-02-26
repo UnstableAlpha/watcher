@@ -1,4 +1,6 @@
 import { useState, useEffect } from 'react';
+import { scannerService } from '../services/scannerService';
+import { APIError } from '../services/api';
 
 export const useScanResults = (isWatching) => {
     const [scannedHosts, setScannedHosts] = useState([]);
@@ -10,16 +12,12 @@ export const useScanResults = (isWatching) => {
 
         const fetchScanResults = async () => {
             try {
-                const response = await fetch('/api/scan-results');
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
-                }
-                const data = await response.json();
+                const data = await scannerService.getScanResults();
                 setScannedHosts(data);
                 setError(null);
             } catch (err) {
                 console.error('Error fetching scan results:', err);
-                setError('Failed to fetch scan results');
+                setError(err instanceof APIError ? err.message : 'Failed to fetch scan results');
             }
         };
 
@@ -41,34 +39,11 @@ export const useScanResults = (isWatching) => {
             
             // Get current timestamp for tracking
             const scanTime = new Date();
-            const scanTimeStr = scanTime.toLocaleString();
-            const scanTimeISO = scanTime.toISOString();
             
             // Store the scan time in localStorage for persistence
-            localStorage.setItem(`scanTime_${host.address}`, scanTimeStr);
+            localStorage.setItem(`scanTime_${host.address}`, scanTime.toLocaleString());
             
-            // Construct the nmap command
-            const command = `nmap -sV -Pn -p ${host.ports
-                .filter(port => port.state === 'open')
-                .map(port => port.portId)
-                .join(',')} ${host.address} -oX /watch/${host.address.replace(/\./g, '_')}-ServiceScan.xml`;
-            
-            const response = await fetch('/api/execute-scan', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ 
-                    command,
-                    hostAddress: host.address,
-                    scanTime: scanTimeISO
-                }),
-            });
-            
-            if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.error || 'Failed to start service scan');
-            }
+            await scannerService.startServiceScan(host, scanTime.toISOString());
             
             // Update the host locally
             setScannedHosts(prev => prev.map(h => {
@@ -76,8 +51,8 @@ export const useScanResults = (isWatching) => {
                     return {
                         ...h,
                         serviceScanned: true,
-                        serviceScannedTime: scanTimeISO,
-                        serviceScannedTimeStr: scanTimeStr
+                        serviceScannedTime: scanTime.toISOString(),
+                        serviceScannedTimeStr: scanTime.toLocaleString()
                     };
                 }
                 return h;
